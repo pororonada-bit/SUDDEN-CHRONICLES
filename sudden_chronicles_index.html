@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sudden Chronicles - Guild Hall</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#151719;color:#e8dfc9;font-family:Georgia,"Noto Serif KR",serif}
+header{text-align:center;padding:30px 15px;background:#202326;border-bottom:2px solid #a17c45}
+h1{margin:0;color:#d6b477;letter-spacing:3px}
+header p{color:#998d78;font-size:13px}
+main{max-width:900px;margin:25px auto;padding:15px}
+.panel{background:#222629;border:1px solid #64563f;padding:22px;margin-bottom:18px;border-radius:8px}
+h2{color:#d6b477;margin-top:0}
+input,button{width:100%;padding:13px;margin:6px 0;border-radius:5px;border:1px solid #66583f;background:#171a1c;color:#eee;font-size:15px}
+button{background:#80643a;color:white;font-weight:bold;cursor:pointer;border:none}
+button:hover{background:#a17c45}
+button:disabled{opacity:.4;cursor:not-allowed}
+.hidden{display:none!important}
+.player{background:#191d20;padding:15px;margin:12px 0;border-left:3px solid #a17c45;border-radius:4px}
+.card{display:inline-block;vertical-align:top;width:155px;min-height:175px;margin:7px;padding:13px;background:#373026;border:1px solid #b49359;border-radius:6px}
+.card strong{display:block;color:#e2bd78;margin-bottom:12px}
+.card small{color:#d2c7b1;line-height:1.5}
+.card button{font-size:12px;padding:8px}
+.muted{color:#998d78;font-size:13px}
+#status{color:#d6b477;white-space:pre-wrap}
+#logs{font-size:13px;color:#b9ad98}
+.log{padding:7px;border-bottom:1px solid #454039}
+.toprow{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.toprow button{width:auto;min-width:120px}
+.code{font-size:25px;color:#e3bf7c;letter-spacing:5px}
+</style>
+</head>
+<body>
+<header><h1>SUDDEN CHRONICLES</h1><p>GUILD MANAGEMENT SYSTEM</p></header>
+<main>
+<section class="panel" id="loginPanel">
+<h2>모험가 등록</h2>
+<input id="nickname" maxlength="20" placeholder="모험가 이름">
+<button onclick="enterGame()">길드 접속</button>
+</section>
+<section class="panel hidden" id="lobby">
+<h2>길드 로비</h2>
+<p class="muted">새로운 모험을 시작하거나 기존 모험에 참가하세요.</p>
+<input id="roomName" maxlength="40" placeholder="모험의 이름">
+<button onclick="createRoom()">새로운 방 생성</button>
+<hr>
+<input id="roomCodeInput" maxlength="6" placeholder="방 코드 입력">
+<button onclick="joinRoom()">방 참가</button>
+</section>
+<section id="game" class="hidden">
+<div class="panel">
+<div class="toprow"><h2 id="roomTitle">모험 진행 중</h2><button onclick="leaveRoom()">로비로</button></div>
+<p class="muted">방 코드</p><div class="code" id="codeDisplay"></div>
+<p id="deckCount">덱 확인 중...</p>
+</div>
+<div class="panel"><h2>길드원 목록</h2><div id="players"></div></div>
+<div class="panel"><h2>공개 손패</h2><p class="muted">모든 참가자의 손패가 공개됩니다.</p><div id="hands"></div></div>
+<div class="panel">
+<h2>내 카드 관리</h2><p class="muted">2d6 판정 합계가 10 이상일 때 카드를 뽑으세요. 손패는 최대 2장입니다.</p>
+<button id="drawButton" onclick="drawCard()">서든 이펙트 카드 뽑기</button><div id="myCards"></div>
+</div>
+<div class="panel"><h2>모험 기록</h2><div id="logs"></div></div>
+</section>
+<p id="status"></p>
+</main>
+<script>
+const SUPABASE_URL = "https://dvajcqiaagrbnamfmcfo.supabase.co";
+const SUPABASE_KEY = "sb_publishable_6k_pWdRPqbMGTIIHTN_mdA_3TNSL6Zl";
+const db = window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+let currentUser=null,currentRoomCode=null,currentPlayerId=null,refreshTimer=null,refreshing=false;
+const $=id=>document.getElementById(id);
+function showStatus(message){$("status").textContent=message}
+function escapeHTML(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+async function enterGame(){
+ const nickname=$("nickname").value.trim();if(!nickname)return showStatus("이름을 입력해 주세요.");
+ showStatus("접속 중...");
+ let {data,error}=await db.auth.getSession();if(error)return showStatus(error.message);
+ if(data.session){currentUser=data.session.user}else{
+  const result=await db.auth.signInAnonymously();
+  if(result.error)return showStatus("로그인 실패: "+result.error.message+"\nSupabase Anonymous Sign-Ins 설정을 확인하세요.");
+  currentUser=result.data.user;
+ }
+ sessionStorage.setItem("sc_nickname",nickname);
+ $("loginPanel").classList.add("hidden");$("lobby").classList.remove("hidden");showStatus("길드 접속 완료!");
+}
+async function createRoom(){
+ const name=$("roomName").value.trim();if(!name)return showStatus("방 이름을 입력하세요.");
+ showStatus("방 생성 중...");
+ const {data,error}=await db.rpc("sc_create_room",{p_room_name:name});
+ if(error)return showStatus("방 생성 실패: "+error.message);
+ currentPlayerId=null;await openRoom(data.room_code,name);
+}
+async function joinRoom(){
+ const code=$("roomCodeInput").value.trim().toUpperCase(),nickname=sessionStorage.getItem("sc_nickname");
+ if(!code)return showStatus("방 코드를 입력하세요.");
+ showStatus("방 참가 중...");
+ const {data,error}=await db.rpc("sc_join_room",{p_room_code:code,p_player_name:nickname});
+ if(error)return showStatus("참가 실패: "+error.message);
+ currentPlayerId=data;await openRoom(code,"모험");
+}
+async function openRoom(code,name){
+ currentRoomCode=code;$("lobby").classList.add("hidden");$("game").classList.remove("hidden");
+ $("roomTitle").textContent=name;$("codeDisplay").textContent=code;
+ await refreshRoom();if(refreshTimer)clearInterval(refreshTimer);refreshTimer=setInterval(refreshRoom,3000);
+}
+async function refreshRoom(){
+ if(!currentRoomCode||refreshing)return;refreshing=true;
+ try{
+  const {data,error}=await db.rpc("sc_get_room_state",{p_room_code:currentRoomCode});if(error)throw error;
+  $("roomTitle").textContent=data.room.name;$("deckCount").textContent="남은 카드: "+data.deck_remaining+" / 20";
+  const players=data.players||[];
+  if(!currentPlayerId&&currentUser){
+   const me=players.find(p=>p.user_id===currentUser.id);
+   if(me)currentPlayerId=me.id;
+  }
+  renderPlayers(players);renderHands(players);renderLogs(data.logs||[]);renderMyCards(players);
+  showStatus("게임 데이터 갱신 완료.");
+ }catch(error){showStatus("갱신 오류: "+error.message)}finally{refreshing=false}
+}
+function renderPlayers(players){
+ $("players").innerHTML=players.map(p=>`<div class="player"><strong>${escapeHTML(p.name)}</strong> <span class="muted">${p.role==="gm"?"길드 마스터":"모험가"}</span></div>`).join("");
+}
+function renderHands(players){
+ $("hands").innerHTML=players.map(p=>`<div class="player"><strong>${escapeHTML(p.name)}</strong><div>${(p.hands||[]).map(c=>`<div class="card"><strong>${escapeHTML(c.name)}</strong><small>${escapeHTML(c.description)}</small></div>`).join("")||'<p class="muted">손패 없음</p>'}</div></div>`).join("");
+}
+function renderMyCards(players){
+ const me=players.find(p=>p.id===currentPlayerId);
+ if(!me){$("myCards").innerHTML='<p class="muted">내 참가자 정보를 확인 중입니다.</p>';$("drawButton").disabled=true;return}
+ $("myCards").innerHTML=(me.hands||[]).map(c=>`<div class="card"><strong>${escapeHTML(c.name)}</strong><small>${escapeHTML(c.description)}</small><button onclick="useCard('${c.hand_id}')">카드 사용</button></div>`).join("")||'<p class="muted">현재 보유한 카드가 없습니다.</p>';
+ $("drawButton").disabled=(me.hands||[]).length>=2;
+}
+function renderLogs(logs){
+ $("logs").innerHTML=logs.map(log=>`<div class="log">${escapeHTML(log.player_name||"참가자")} · ${log.action==="DRAW"?"카드 획득":"카드 사용"} · ${escapeHTML(log.details?.card_id||"")}</div>`).join("")||'<p class="muted">아직 기록이 없습니다.</p>';
+}
+async function drawCard(){
+ const {data,error}=await db.rpc("sc_draw_card");if(error)return showStatus("카드 뽑기 실패: "+error.message);
+ showStatus("카드를 뽑았습니다: "+data);await refreshRoom();
+}
+async function useCard(handId){
+ if(!confirm("이 카드를 사용하고 덱으로 돌려보낼까요?"))return;
+ const {data,error}=await db.rpc("sc_use_card",{p_hand_id:handId});if(error)return showStatus("카드 사용 실패: "+error.message);
+ showStatus("카드를 사용했습니다: "+data);await refreshRoom();
+}
+function leaveRoom(){
+ if(refreshTimer)clearInterval(refreshTimer);refreshTimer=null;currentRoomCode=null;currentPlayerId=null;
+ $("game").classList.add("hidden");$("lobby").classList.remove("hidden");showStatus("로비로 돌아왔습니다.");
+}
+async function init(){
+ const {data}=await db.auth.getSession();
+ if(data.session){currentUser=data.session.user;$("nickname").value=sessionStorage.getItem("sc_nickname")||""}
+}
+init();
+</script>
+</body>
+</html>
