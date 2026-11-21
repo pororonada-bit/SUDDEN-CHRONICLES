@@ -1,0 +1,204 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudden Chronicles</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;background:#151719;color:#e8dfc9;
+ font-family:Georgia,"Noto Serif KR",serif;
+}
+header{
+ padding:25px;text-align:center;
+ background:#202326;border-bottom:2px solid #9a7947;
+}
+h1{margin:0;color:#d6b477;letter-spacing:3px}
+.subtitle{color:#998d78;margin-top:8px;font-size:13px}
+main{max-width:850px;margin:30px auto;padding:15px}
+.panel{
+ background:#222629;border:1px solid #64563f;
+ padding:22px;margin-bottom:18px;border-radius:8px;
+}
+h2{color:#d6b477;margin-top:0}
+input,button{
+ width:100%;padding:12px;margin:6px 0;
+ border-radius:5px;border:1px solid #66583f;
+ background:#171a1c;color:#eee;font-size:15px;
+}
+button{
+ background:#80643a;color:white;font-weight:bold;
+ cursor:pointer;border:none;
+}
+button:hover{background:#a17c45}
+button:disabled{opacity:.4;cursor:not-allowed}
+.hidden{display:none}
+.player{
+ padding:12px;margin:8px 0;
+ background:#191d20;border-left:3px solid #a17c45;
+}
+.card{
+ display:inline-block;vertical-align:top;
+ width:145px;min-height:145px;
+ margin:7px;padding:12px;
+ background:#373026;border:1px solid #b49359;
+ border-radius:6px;
+}
+.card strong{display:block;color:#e2bd78;margin-bottom:10px}
+.card small{color:#d2c7b1}
+#status{color:#d6b477;white-space:pre-wrap}
+#logs{font-size:13px;color:#b9ad98;max-height:180px;overflow:auto}
+</style>
+</head>
+<body>
+<header>
+ <h1>SUDDEN CHRONICLES</h1>
+ <div class="subtitle">GUILD MANAGEMENT SYSTEM</div>
+</header>
+
+<main>
+ <section class="panel" id="loginPanel">
+  <h2>모험가 등록</h2>
+  <input id="nickname" placeholder="모험가 이름">
+  <button onclick="enterGame()">접속하기</button>
+ </section>
+
+ <section class="panel hidden" id="lobby">
+  <h2>길드 로비</h2>
+  <input id="roomName" placeholder="새로운 모험의 이름">
+  <button onclick="createRoom()">새로운 방 생성</button>
+  <hr>
+  <input id="roomCode" placeholder="방 코드 입력">
+  <button onclick="joinRoom()">방 참가</button>
+ </section>
+
+ <section class="hidden" id="game">
+  <div class="panel">
+   <h2 id="roomTitle">모험 진행 중</h2>
+   <p>방 코드: <strong id="codeDisplay"></strong></p>
+   <p id="deckCount">덱 정보 불러오는 중...</p>
+  </div>
+
+  <div class="panel">
+   <h2>길드원 목록</h2>
+   <div id="players"></div>
+  </div>
+
+  <div class="panel">
+   <h2>공개 손패</h2>
+   <div id="hands"></div>
+  </div>
+
+  <div class="panel">
+   <h2>모험 기록</h2>
+   <div id="logs"></div>
+  </div>
+ </section>
+
+ <p id="status"></p>
+</main>
+
+<script>
+const SUPABASE_URL = "여기에_SUPABASE_PROJECT_URL";
+const SUPABASE_KEY = "여기에_PUBLISHABLE_KEY";
+
+const db = window.supabase.createClient(
+ SUPABASE_URL,
+ SUPABASE_KEY
+);
+
+let user = null;
+let playerId = null;
+let currentRoom = null;
+let roomChannel = null;
+
+const $ = id => document.getElementById(id);
+const status = message => $("status").textContent = message;
+
+async function enterGame(){
+ const nickname = $("nickname").value.trim();
+ if(!nickname) return status("이름을 입력해 주세요.");
+
+ const {data,error} = await db.auth.signInAnonymously();
+ if(error) return status(error.message);
+
+ user = data.user;
+ sessionStorage.setItem("sc_nickname",nickname);
+
+ $("loginPanel").classList.add("hidden");
+ $("lobby").classList.remove("hidden");
+ status("접속 완료: "+nickname);
+}
+
+async function createRoom(){
+ if(!user) return status("먼저 접속해 주세요.");
+
+ const name = $("roomName").value.trim();
+ if(!name) return status("방 이름을 입력해 주세요.");
+
+ const {data,error} = await db.rpc("create_game_room",{
+  p_room_name:name,
+  p_host_id:user.id,
+  p_host_name:sessionStorage.getItem("sc_nickname")
+ });
+
+ if(error) return status(error.message);
+
+ const room = Array.isArray(data) ? data[0] : data;
+ playerId = null;
+ await enterRoom(room.room_id,room.room_code,name);
+}
+
+async function joinRoom(){
+ if(!user) return status("먼저 접속해 주세요.");
+
+ const code = $("roomCode").value.trim();
+ if(!code) return status("방 코드를 입력해 주세요.");
+
+ const {data,error} = await db.rpc("join_game_room",{
+  p_room_code:code,
+  p_user_id:user.id,
+  p_player_name:sessionStorage.getItem("sc_nickname")
+ });
+
+ if(error) return status(error.message);
+
+ playerId = data;
+ await enterRoom(null,code,"모험");
+}
+
+async function enterRoom(roomId,code,name){
+ currentRoom = roomId;
+ $("lobby").classList.add("hidden");
+ $("game").classList.remove("hidden");
+ $("roomTitle").textContent = name;
+ $("codeDisplay").textContent = code;
+
+ if(roomChannel) await db.removeChannel(roomChannel);
+
+ // 실시간 변경 알림
+ roomChannel = db.channel("room-"+code)
+  .on("postgres_changes",{
+   event:"*",schema:"public",table:"players"
+  },refreshRoom)
+  .on("postgres_changes",{
+   event:"*",schema:"public",table:"player_hands"
+  },refreshRoom)
+  .on("postgres_changes",{
+   event:"*",schema:"public",table:"game_logs"
+  },refreshRoom)
+  .subscribe();
+
+ await refreshRoom();
+}
+
+async function refreshRoom(){
+ // 실제 데이터 조회는 다음 단계에서 RLS 정책과 함께 연결
+ status("방에 접속했습니다. 데이터 권한 설정을 기다리는 중입니다.");
+}
+</script>
+</body>
+</html>
